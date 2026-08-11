@@ -1,0 +1,533 @@
+# breakout-boring — Boring-authored ECS data, pure game logic, and native
+# Bevy systems for a port of Bevy's official "Breakout" showcase example
+# (examples/showcase/breakout.rs, bevy v0.19.0).
+#
+# What ties this file to Bevy:
+#   1. `use bevy.prelude.*` below — a generic Boring `use` (dotted-path
+#      passthrough), transpiled verbatim to `use bevy::prelude::*;`.
+#   2. `struct X as Component, ...:` / `as Resource, ...:` / `as Event, ...:`
+#      header trait lists — `Component`/`Resource`/`Event`/`Deref` are
+#      registered as known derive macros via ../boring.toml's `[derives]`
+#      (which pulls in ../boring-bevylib/derives.toml), so the transpiler
+#      routes them into `#[derive(...)]` instead of requiring/emitting a
+#      manual `impl Trait for X { ... }` — see `boring`'s docs/book.md
+#      "Advanced — derive-trait whitelist" section. `@require(...)` (on
+#      `Wall` below) stays a plain `@name(args)` -> `#[name(args)]`
+#      passthrough attribute — it isn't a derive at all.
+#   3. `move_paddle`/`apply_velocity`/`check_for_collisions`/
+#      `play_collision_sound`/`update_scoreboard` below are real Bevy
+#      *systems* — native `Query<...>`/`Single<...>`/`Commands`/`Res`/
+#      `ResMut`/`On<...>` syntax, not just plain-data logic. Requires a
+#      `boring` built from `main` (see ../README.md's "Building boring"
+#      section).
+#   4. `update_scoreboard` specifically needs `.pointee` — Boring's postfix
+#      dereference accessor for opaque/external Rust values (e.g. Bevy's
+#      `Single<T>`, `Mut<T>`) that implement `Deref`/`DerefMut` but aren't
+#      structs Boring manages itself. `writer.text(...)` returns a
+#      `Mut<String>`-shaped guard only readable/writable through a deref —
+#      `expr.pointee` emits Rust's `*expr` verbatim, in both read and
+#      assignment-target position. See `boring`'s tests/cases/pointee.br for
+#      the language-level regression test.
+#
+# `setup` doesn't exist anymore as a single function — it's split into
+# several small `Startup` systems below, all Boring-authored, alongside
+# `build_app` itself and the entry point `run_game` — see ../README.md
+# for the full split (down to just `src/lib.rs`'s `pub mod boring_gen;`
+# and `src/main.rs`'s one-line wrapper now, both structural rather than
+# language gaps).
+
+use bevy.prelude.*
+
+# ─── Module constants ────────────────────────────────────────────────────────
+# Plain numbers, plus Vec2/Vec3/Color/FontSize/Val values too — every
+# constant the game needs lives here now. Two things had to land upstream
+# for that:
+#   - External-call constant promotion (`Color.srgb(...)`/`Vec2.new(...)`/
+#     `FontSize.Px(...)` → a real `const`, not the ergonomically-broken
+#     `LazyLock<T>` it used to be for calls, or stuck-in-`fn main()` for
+#     enum-tuple-variant construction — task_f8a348fc/task_a70a2a15, both
+#     fixed on `main`) — confirmed with a real `cargo build` using one
+#     directly in a struct literal field, not just a bare read.
+#   - `pub let` at module scope always promotes to a real `pub const` now,
+#     regardless of whether anything *inside this file* reads it
+#     (task_a76289da, fixed on `main`) — this project hit that gap for
+#     real: `SCOREBOARD_FONT_SIZE`/`SCOREBOARD_TEXT_PADDING` briefly moved
+#     back out to `../src/lib.rs` because neither was read anywhere in
+#     this file yet at the time. Both ended up moving back in anyway once
+#     `spawn_scoreboard_ui` below was written to read them directly
+#     instead of taking them as parameters — which was always possible,
+#     independent of this fix — but the fix means it's no longer a
+#     precondition either way.
+#
+# `pub` on the constants below (`pub let ...`) is what lets ../src/lib.rs
+# read them directly as `boring_gen::LEFT_WALL` etc. instead of keeping its
+# own duplicate copies (`pub let` at module scope emits a real `pub const`
+# — task_94df816c, fixed on `main`; confirmed with a real cross-module
+# `cargo build`, not just a single-file `--emit-rust` check, since the
+# whole point of `pub` is cross-module visibility). Everything else below
+# is plain (private) `let` — nothing outside this file needs it anymore,
+# now that `setup`'s paddle/ball/wall/brick spawning lives here too.
+
+pub let float32 LEFT_WALL = -450.0
+pub let float32 RIGHT_WALL = 450.0
+pub let float32 BOTTOM_WALL = -300.0
+pub let float32 TOP_WALL = 300.0
+let float32 WALL_THICKNESS = 10.0
+let float32 PADDLE_PADDING = 10.0
+let float32 PADDLE_SPEED = 500.0
+pub let float32 BALL_DIAMETER = 30.0
+let float32 GAP_BETWEEN_PADDLE_AND_FLOOR = 60.0
+let float32 BALL_SPEED = 400.0
+let float32 GAP_BETWEEN_PADDLE_AND_BRICKS = 270.0
+let float32 GAP_BETWEEN_BRICKS = 5.0
+let float32 GAP_BETWEEN_BRICKS_AND_CEILING = 20.0
+let float32 GAP_BETWEEN_BRICKS_AND_SIDES = 20.0
+
+let PADDLE_SIZE = Vec2.new(120.0, 20.0)
+let BALL_STARTING_POSITION = Vec3.new(0.0, -50.0, 1.0)
+let INITIAL_BALL_DIRECTION = Vec2.new(0.5, -0.5)
+let BRICK_SIZE = Vec2.new(100.0, 30.0)
+
+let PADDLE_COLOR = Color.srgb(0.3, 0.3, 0.7)
+let BALL_COLOR = Color.srgb(1.0, 0.5, 0.5)
+let BRICK_COLOR = Color.srgb(0.5, 0.5, 1.0)
+let WALL_COLOR = Color.srgb(0.8, 0.8, 0.8)
+let BACKGROUND_COLOR = Color.srgb(0.9, 0.9, 0.9)
+
+# ─── Marker components ───────────────────────────────────────────────────────
+# Zero-field unit structs — Boring's `pass` body (a recent addition; see
+# ../README.md) makes these real, not just placeholders.
+#
+# `Debug` is listed in every header below even though nothing here calls
+# `{:?}` directly and — now that these use `as Trait:` header syntax rather
+# than an explicit `@derive(...)` — the transpiler's own auto-derive default
+# always includes it regardless (it's needed by the `Display` impl Boring
+# generates for *every* struct, which formats via `{:?}`). Listing it
+# explicitly is redundant here but kept for clarity: it documents that these
+# types are meant to support `{:?}`/`{}` formatting, matching the original
+# Rust's explicit `#[derive(Component, Debug)]` style, and it's still load-
+# bearing the moment any of these switches to a real `@derive(...)` list
+# (same rule `bevy-boring/boring/sim.br` follows) — omit it there and the
+# generated `Display` impl fails to compile (`doesn't implement
+# std::fmt::Debug`).
+
+pub struct Paddle as Component, Debug:
+    pass
+
+pub struct Ball as Component, Debug:
+    pass
+
+pub struct Brick as Component, Debug:
+    pass
+
+# `Default` is required because `Wall` below requires this component —
+# Bevy's `#[require(...)]` needs the required type to implement `Default`.
+pub struct Collider as Component, Default, Debug:
+    pass
+
+# `@require(Sprite, Transform, Collider)` stacks on top of the `as Component:`
+# header — a plain passthrough attribute alongside a header trait list,
+# confirmed working (see ../README.md). Matches the original's
+# `#[require(Sprite, Transform, Collider)]` almost verbatim.
+@require(Sprite, Transform, Collider)
+pub struct Wall as Component, Debug:
+    pass
+
+pub struct ScoreboardUi as Component, Debug:
+    pass
+
+pub struct BallCollided as Event, Debug:
+    pass
+
+# ─── Components with data ────────────────────────────────────────────────────
+# `float32` throughout this file (not `float`/f64) — matches Bevy's
+# `Transform`/`Vec2`/`Vec3` (`f32`) exactly, so no cast is ever needed at a
+# Rust/Bevy boundary. (There's a known transpiler bug where a `float32`
+# function that calls a builtin like `sqrt()` emits a mismatched `f64` body
+# — filed as task_b09eda59 — but nothing here calls `sqrt()`, so it never
+# hits that path; `clamp`/`abs`/plain arithmetic on `float32` are confirmed
+# fine.)
+
+pub struct Velocity as Component, Debug, Clone:
+    pub float32 x
+    pub float32 y
+
+# ─── Resources ────────────────────────────────────────────────────────────────
+
+pub struct Score as Resource, Debug, Clone:
+    pub var int count = 0
+
+    pub def increment():
+        count += 1
+
+# Generic external Bevy type (`Handle<AudioSource>`) as a struct field, plus
+# `Deref` (bevy_derive's `#[derive(Deref)]`, registered via
+# ../boring-bevylib/derives.toml) — confirmed compiling against real bevy,
+# including `sound.clone()` auto-deref through the named field (not just a
+# tuple struct, which is what the original uses and what Boring has no
+# syntax for).
+#
+# `@derive()` (empty) here, rather than no attribute at all, is load-bearing:
+# with no explicit `@derive(...)`, the transpiler's own auto-default always
+# adds `Clone` on top of whatever the header lists (see the "Marker
+# components" comment above) — and `CollisionSound` specifically must NOT
+# derive `Clone` itself. `sound.clone()` above relies on method resolution
+# failing to find `.clone()` on `CollisionSound` and falling through `Deref`
+# to `Handle<AudioSource>`'s `.clone()` instead; a `Clone` derived directly
+# on `CollisionSound` shadows that and breaks `sound.clone()`'s return type
+# (confirmed: a real `cargo build` against bevy fails with `expected
+# Handle<AudioSource>, found CollisionSound` without this). The empty
+# `@derive()` suppresses the auto-default entirely while still letting the
+# header route `Resource`/`Deref`/`Debug` into the one resulting
+# `#[derive(...)]` — see docs/book.md's "derive-trait whitelist" section.
+@derive()
+pub struct CollisionSound as Resource, Deref, Debug:
+    pub Handle<AudioSource> handle
+
+# ─── Plain value types for pure logic ────────────────────────────────────────
+# Deliberately NOT Bevy types (no Component/Resource/Event header) —
+# decouples the geometry/collision math below from ECS storage so it's
+# trivially unit-testable on its own.
+
+pub struct Point:
+    pub float32 x
+    pub float32 y
+
+pub struct BrickLayout:
+    pub int n_columns
+    pub int n_rows
+    pub float32 offset_x
+    pub float32 offset_y
+
+# ─── Enums with methods ──────────────────────────────────────────────────────
+# `req`/`def` inside an `enum:` block, dispatching on `self` — a recent
+# addition (see ../README.md); lets `WallLocation`/`Collision` mirror the
+# original's `impl WallLocation { fn position(&self) ... }` almost exactly
+# now, right down to `size()` computing arena_width/height internally from
+# the module constants above rather than taking them as parameters.
+
+pub enum WallLocation:
+    Left
+    Right
+    Bottom
+    Top
+
+    # Was `wall_position`/`wall_size` — renamed back now that task_2452d1d1
+    # landed. A method literally named `position` used to get a spurious
+    # `.cloned()` inserted before every call site (`location.cloned()
+    # .position()`, and `WallLocation` has no `.cloned()` since it isn't an
+    # iterator) — the transpiler hardcode-assumed any `.position()` call
+    # meant `Iterator::position` regardless of the receiver's own methods.
+    # Confirmed fixed with the same minimal repro before reverting.
+    pub req Point position():
+        match self:
+            Left:   Point(x = LEFT_WALL, y = 0.0)
+            Right:  Point(x = RIGHT_WALL, y = 0.0)
+            Bottom: Point(x = 0.0, y = BOTTOM_WALL)
+            Top:    Point(x = 0.0, y = TOP_WALL)
+
+    pub req Point size():
+        let arena_height = TOP_WALL - BOTTOM_WALL
+        let arena_width = RIGHT_WALL - LEFT_WALL
+        assert(arena_height > 0.0)
+        assert(arena_width > 0.0)
+        match self:
+            Left:   Point(x = WALL_THICKNESS, y = arena_height + WALL_THICKNESS)
+            Right:  Point(x = WALL_THICKNESS, y = arena_height + WALL_THICKNESS)
+            Bottom: Point(x = arena_width + WALL_THICKNESS, y = WALL_THICKNESS)
+            Top:    Point(x = arena_width + WALL_THICKNESS, y = WALL_THICKNESS)
+
+pub enum Collision:
+    Left
+    Right
+    Top
+    Bottom
+
+# ─── Pure geometry / collision logic (no Bevy types in any signature) ───────
+
+pub def Point move_by_velocity(Point pos, Velocity v, float32 dt):
+    Point(x = pos.x + v.x * dt, y = pos.y + v.y * dt)
+
+pub def float32 clamp_paddle_x(float32 current_x, float32 direction, float32 speed, float32 dt, float32 left_bound, float32 right_bound):
+    let new_x = current_x + direction * speed * dt
+    clamp(new_x, left_bound, right_bound)
+
+# Circle/AABB closest-point test + which side got hit, ported 1:1 from the
+# original's free function of the same name (already Bevy-type-free logic
+# there — just swapping `BoundingCircle`/`Aabb2d` for plain `Point`/`float32`).
+pub def Collision? ball_collision(Point ball_center, float32 ball_radius, Point box_center, Point box_half_size):
+    let closest_x = clamp(ball_center.x, box_center.x - box_half_size.x, box_center.x + box_half_size.x)
+    let closest_y = clamp(ball_center.y, box_center.y - box_half_size.y, box_center.y + box_half_size.y)
+    let offset_x = ball_center.x - closest_x
+    let offset_y = ball_center.y - closest_y
+    let dist_sq = offset_x * offset_x + offset_y * offset_y
+    if dist_sq > ball_radius * ball_radius:
+        return nil
+    if abs(offset_x) > abs(offset_y):
+        if offset_x < 0.0:
+            return Collision.Left
+        else:
+            return Collision.Right
+    else:
+        if offset_y > 0.0:
+            return Collision.Top
+        else:
+            return Collision.Bottom
+
+pub def Velocity reflect_velocity(Velocity v, Collision c):
+    var reflect_x = false
+    var reflect_y = false
+    match c:
+        Left:   reflect_x = v.x > 0.0
+        Right:  reflect_x = v.x < 0.0
+        Top:    reflect_y = v.y < 0.0
+        Bottom: reflect_y = v.y > 0.0
+    let nx = match reflect_x with true: -v.x, false: v.x
+    let ny = match reflect_y with true: -v.y, false: v.y
+    Velocity(x = nx, y = ny)
+
+# Grid-geometry math from the original's `setup()` — computes how many
+# rows/columns of bricks fit and where the grid starts, so the Rust spawn
+# loop just iterates `0..n_rows` / `0..n_columns` and calls `brick_position`.
+pub def BrickLayout brick_layout(float32 total_width, float32 total_height, float32 brick_w, float32 brick_h, float32 gap, float32 left_wall, float32 right_wall, float32 bricks_bottom_y):
+    assert(total_width > 0.0)
+    assert(total_height > 0.0)
+    let n_columns = floor(total_width / (brick_w + gap)) as int
+    let n_rows = floor(total_height / (brick_h + gap)) as int
+    let n_vertical_gaps = n_columns - 1
+    let center_x = (left_wall + right_wall) / 2.0
+    let left_edge = center_x - (n_columns as float32 / 2.0 * brick_w) - (n_vertical_gaps as float32 / 2.0 * gap)
+    let offset_x = left_edge + brick_w / 2.0
+    let offset_y = bricks_bottom_y + brick_h / 2.0
+    BrickLayout(n_columns = n_columns, n_rows = n_rows, offset_x = offset_x, offset_y = offset_y)
+
+pub def Point brick_position(BrickLayout layout, int row, int column, float32 brick_w, float32 brick_h, float32 gap):
+    Point(x = layout.offset_x + column as float32 * (brick_w + gap), y = layout.offset_y + row as float32 * (brick_h + gap))
+
+# Used to take `color: Color` as a parameter instead of reading `WALL_COLOR`
+# directly — external-call-initialized constants used to promote to a
+# `LazyLock<Color>`, not a plain `Color`, needing a `.pointee` at every use
+# site (task_f8a348fc). Fixed on `main` now (confirmed with a real
+# `cargo build` using `WALL_COLOR` directly in `Sprite.from_color(...)`
+# below, no `.pointee` needed) — dropped the parameter.
+pub def (Wall, Sprite, Transform) wall_bundle(WallLocation location):
+    let pos = location.position()
+    let size = location.size()
+    (Wall(), Sprite.from_color(WALL_COLOR, Vec2.ONE), Transform(translation = Vec3.new(pos.x, pos.y, 0.0), scale = Vec3.new(size.x, size.y, 1.0), _))
+
+# ─── Startup systems (entity spawning) ───────────────────────────────────────
+# Used to be one big hand-written Rust `setup()`. Split into several small
+# `Startup` systems here instead of one big function — Bevy doesn't care,
+# `Startup`-scheduled systems with no data dependency between them can run
+# in any order, and `build_app()` just lists them all in a tuple.
+
+pub def spawn_camera(mut Commands commands):
+    commands.spawn(Camera2d)
+
+# Used to be `build_app`'s `.insert_resource(ClearColor(BACKGROUND_COLOR))`,
+# in ../src/lib.rs — `ClearColor(...)` is a plain external tuple struct
+# with no inherent `new()` (same shape `Mesh2d`/`TextColor` were before
+# their fix), and it wasn't on the fixed allowlist yet (it emitted the
+# invalid `ClearColor::new(...)`). Fixed on `main` now — confirmed with a
+# real `cargo build` before this was written (task_cdb145d3).
+pub def set_clear_color(mut Commands commands):
+    commands.insert_resource(ClearColor(BACKGROUND_COLOR))
+
+pub def load_collision_sound(mut Commands commands, Res<AssetServer> asset_server):
+    let handle = asset_server.load("sounds/breakout_collision.ogg")
+    commands.insert_resource(CollisionSound(handle = handle))
+
+pub def spawn_paddle(mut Commands commands):
+    let paddle_y = BOTTOM_WALL + GAP_BETWEEN_PADDLE_AND_FLOOR
+    commands.spawn((
+        Sprite.from_color(PADDLE_COLOR, Vec2.ONE),
+        Transform(translation = Vec3.new(0.0, paddle_y, 0.0), scale = PADDLE_SIZE.extend(1.0), _),
+        Paddle(),
+        Collider()))
+
+# `Mesh2d(...)`/`MeshMaterial2d(...)` — plain external tuple structs with no
+# `::new()` — used to emit the invalid `Mesh2d::new(...)` (task_306c80f5).
+# Fixed on `main` now (confirmed with a real `cargo build` against bevy),
+# the literal call form below is what unblocked this system entirely.
+pub def spawn_ball(mut Commands commands, mut ResMut<Assets<Mesh>> meshes, mut ResMut<Assets<ColorMaterial>> materials):
+    let initial_velocity = INITIAL_BALL_DIRECTION.normalize() * BALL_SPEED
+    commands.spawn((
+        Mesh2d(meshes.add(Circle.default())),
+        MeshMaterial2d(materials.add(BALL_COLOR)),
+        Transform.from_translation(BALL_STARTING_POSITION).with_scale(Vec2.splat(BALL_DIAMETER).extend(1.0)),
+        Ball(),
+        Velocity(x = initial_velocity.x, y = initial_velocity.y)))
+
+pub def spawn_walls(mut Commands commands):
+    commands.spawn(wall_bundle(WallLocation.Left))
+    commands.spawn(wall_bundle(WallLocation.Right))
+    commands.spawn(wall_bundle(WallLocation.Bottom))
+    commands.spawn(wall_bundle(WallLocation.Top))
+
+pub def spawn_bricks(mut Commands commands):
+    let paddle_y = BOTTOM_WALL + GAP_BETWEEN_PADDLE_AND_FLOOR
+    let total_width_of_bricks = (RIGHT_WALL - LEFT_WALL) - 2.0 * GAP_BETWEEN_BRICKS_AND_SIDES
+    let bottom_edge_of_bricks = paddle_y + GAP_BETWEEN_PADDLE_AND_BRICKS
+    let total_height_of_bricks = TOP_WALL - bottom_edge_of_bricks - GAP_BETWEEN_BRICKS_AND_CEILING
+    let layout = brick_layout(total_width_of_bricks, total_height_of_bricks, BRICK_SIZE.x, BRICK_SIZE.y, GAP_BETWEEN_BRICKS, LEFT_WALL, RIGHT_WALL, bottom_edge_of_bricks)
+    for row in 0..layout.n_rows:
+        for column in 0..layout.n_columns:
+            let pos = brick_position(layout, row, column, BRICK_SIZE.x, BRICK_SIZE.y, GAP_BETWEEN_BRICKS)
+            commands.spawn((
+                Sprite(color = BRICK_COLOR, _),
+                Transform(translation = Vec3.new(pos.x, pos.y, 0.0), scale = Vec3.new(BRICK_SIZE.x, BRICK_SIZE.y, 1.0), _),
+                Brick(),
+                Collider()))
+
+# ─── Native Bevy systems ──────────────────────────────────────────────────────
+# Real bevy_ecs::system parameter types (Query/Single/Commands/Res/ResMut/
+# On<...>), native Boring syntax. All delegate the actual math/mutation to
+# the plain functions/methods above rather than duplicating logic.
+
+pub def apply_velocity(Query<(mut Transform&, Velocity&)> query, Res<Time> time):
+    let dt = time.delta_secs()
+    for transform, velocity in query:
+        let next = move_by_velocity(Point(x = transform.translation.x, y = transform.translation.y), velocity, dt)
+        transform.translation.x = next.x
+        transform.translation.y = next.y
+
+pub def move_paddle(Res<ButtonInput<KeyCode>> keyboard_input, mut Single<mut Transform&, With<Paddle>> paddle_transform, Res<Time> time):
+    var direction = 0.0
+    if keyboard_input.pressed(KeyCode.ArrowLeft):
+        direction -= 1.0
+    if keyboard_input.pressed(KeyCode.ArrowRight):
+        direction += 1.0
+    let left_bound = LEFT_WALL + WALL_THICKNESS / 2.0 + PADDLE_SIZE.x / 2.0 + PADDLE_PADDING
+    let right_bound = RIGHT_WALL - WALL_THICKNESS / 2.0 - PADDLE_SIZE.x / 2.0 - PADDLE_PADDING
+    let new_x = clamp_paddle_x(paddle_transform.translation.x, direction, PADDLE_SPEED, time.delta_secs(), left_bound, right_bound)
+    paddle_transform.translation.x = new_x
+
+pub def check_for_collisions(mut Commands commands, mut ResMut<Score> score, mut Single<(mut Velocity&, Transform&), With<Ball>> ball_query, Query<(Entity, Transform&, Option<Brick&>), With<Collider>> collider_query):
+    mut ball = ball_query.into_inner()
+    for entity, collider_transform, maybe_brick in collider_query:
+        let maybe_collision = ball_collision(
+            Point(x = ball.1.translation.x, y = ball.1.translation.y),
+            BALL_DIAMETER / 2.0,
+            Point(x = collider_transform.translation.x, y = collider_transform.translation.y),
+            Point(x = collider_transform.scale.x / 2.0, y = collider_transform.scale.y / 2.0))
+        if let collision = maybe_collision:
+            commands.trigger(BallCollided())
+            if maybe_brick.is_some():
+                commands.entity(entity).despawn()
+                score.increment()
+            let reflected = reflect_velocity(Velocity(x = ball.0.x, y = ball.0.y), collision)
+            ball.0.x = reflected.x
+            ball.0.y = reflected.y
+
+pub def play_collision_sound(On<BallCollided> collided, mut Commands commands, Res<CollisionSound> sound):
+    commands.spawn(AudioPlayer(sound.clone()))
+
+# `SCOREBOARD_FONT_SIZE`/`SCOREBOARD_TEXT_PADDING`/`TEXT_COLOR`/
+# `SCORE_COLOR` used to be Rust `pub const`s, passed in as plain
+# parameters here, on the (wrong) assumption that they were permanently
+# blocked the same way task_a76289da describes — that bug is real, but
+# it's specifically about a `pub let` with *zero in-file consumers*.
+# These four are consumed right here, in this very function, so they
+# promote to real `const`s exactly like every other module constant in
+# this file (confirmed with a real `cargo build`) — no `pub` needed
+# either, since nothing outside this file reads them anymore.
+# `TextColor(...)` needed its own fix to emit a real constructor instead
+# of the nonexistent `TextColor::new(...)` (task_4efa7b8b, fixed on
+# `main`) — confirmed with a real `cargo build` before this was written.
+let SCOREBOARD_FONT_SIZE = FontSize.Px(33.0)
+let SCOREBOARD_TEXT_PADDING = Val.Px(5.0)
+let TEXT_COLOR = Color.srgb(0.5, 0.5, 1.0)
+let SCORE_COLOR = Color.srgb(1.0, 0.5, 0.5)
+
+# Registered directly as a `Startup` system now — plain `Commands`, no
+# extra parameters needed since the four constants above moved here.
+# Split into two statements (`mut root = ...` then `root.with_children(
+# ...)`) rather than one chained expression — a method call chained on a
+# new line after a multi-line `commands.spawn((...))` is a hard parser
+# error (`unexpected token in expression: Indent`); Boring doesn't
+# support that continuation shape, unlike Python's implicit parenthesized
+# line continuation.
+pub def spawn_scoreboard_ui(mut Commands commands):
+    mut root = commands.spawn((
+        Text.new("Score: "),
+        TextFont(font_size = SCOREBOARD_FONT_SIZE, _),
+        TextColor(TEXT_COLOR),
+        ScoreboardUi(),
+        Node(position_type = PositionType.Absolute, top = SCOREBOARD_TEXT_PADDING, left = SCOREBOARD_TEXT_PADDING, _)))
+    # `drop(...)` around the closure's only expression is load-bearing, not
+    # decorative: `parent.spawn(...)` returns `EntityCommands`, but
+    # `.with_children(...)`'s closure must return `()` — a bare
+    # single-expression closure body here would fail to compile
+    # (`expected (), found EntityCommands`, confirmed with a real
+    # `cargo build`). `drop()` (a builtin, see book.md's Ownership
+    # section) discards the value and evaluates to `()`.
+    root.with_children((parent): drop(parent.spawn((TextSpan.default(), TextFont(font_size = SCOREBOARD_FONT_SIZE, _), TextColor(SCORE_COLOR)))))
+
+# `score_root.pointee` unwraps the `Single<Entity, F>` deref wrapper to the
+# `Entity` it wraps (read-only — `Entity` is `Copy`, no `mut` needed on the
+# param). `writer.text(...).pointee = ...` writes through the `Mut<String>`-
+# shaped guard `TextUiWriter::text()` returns — this is the one call site
+# `.pointee` exists for; see the file header's point 4.
+# `score.count` used to need a same-named-avoiding getter (`score.value()`)
+# — field access through `Res<T>`/`ResMut<T>` misresolved to the `.len()`
+# builtin the same way a direct receiver's `.count` used to (task_791a91d0,
+# fixed on `main`; confirmed with the exact same minimal repro before
+# reverting). `.to_string()` at the end is load-bearing, not decorative:
+# `writer.text(...)` returns a `Mut<String>`-shaped guard, and Boring's own
+# `string` type is `Rc<str>`/`Arc<str>` (never `String` — see book.md), so
+# a bare interpolated string here would emit an `Arc<str>` and fail to
+# typecheck against the `String` the deref-assignment expects (confirmed:
+# E0308 without this call). `.to_string()` passes through generically
+# (Boring has no `string(x)` builtin, but arbitrary methods on a string
+# receiver aren't intercepted) and produces a real owned `String` via
+# `Arc<str>`'s blanket `Display` impl.
+pub def update_scoreboard(Res<Score> score, Single<Entity, (With<ScoreboardUi>, With<Text>)> score_root, mut TextUiWriter writer):
+    writer.text(score_root.pointee, 1).pointee = "{score.count}".to_string()
+
+# ─── App wiring + entry point ────────────────────────────────────────────────
+# `build_app` used to be hand-written Rust in ../src/lib.rs — on the
+# (never actually re-tested) assumption that App-wiring code needed Rust.
+# It doesn't: `App.new()`/`.add_plugins(...)`/`.add_systems(...)`/
+# `.add_observer(...)` are all just generic method calls, and a tuple of
+# function names + `.chain()` already worked (confirmed way back when
+# `run_game` below was first written) — the only thing that needed
+# checking was whether a multi-statement function returning its `mut`
+# local at the end infers the right return type. It doesn't by default
+# (`pub def build_app():` alone infers `-> ()`, silently turning the
+# trailing `app` into a discarded statement) — an explicit `pub def App
+# build_app():` return-type annotation fixes it. Confirmed with a real
+# `cargo build` before this was written.
+#
+# `run_game` calls it and runs it. `../src/main.rs` is a one-line wrapper
+# around `run_game` instead of hand-writing any of this itself — there's
+# still a real `fn main()` in `src/main.rs`, not a function here: Boring's
+# per-file `--emit-rust` output lands inside `mod boring_gen { ... }`
+# (`pub mod boring_gen;` in lib.rs, so tests can import from it), and a
+# nested module's `fn main` isn't a valid Cargo `[[bin]]` entry point —
+# only a real crate-root file can be that, regardless of what generates its
+# content. That's a Cargo/module-layout fact, not a Boring language gap —
+# see ../README.md.
+pub def App build_app():
+    mut app = App.new()
+    app.add_plugins(DefaultPlugins)
+    app.insert_resource(Score(count = 0))
+    app.add_systems(Startup, (set_clear_color, spawn_camera, load_collision_sound, spawn_paddle, spawn_ball, spawn_walls, spawn_bricks, spawn_scoreboard_ui))
+    app.add_systems(Update, (apply_velocity, move_paddle, check_for_collisions).chain())
+    app.add_systems(Update, update_scoreboard)
+    app.add_observer(play_collision_sound)
+    app
+
+pub def run_game():
+    build_app().run()
+
+# The real crate entry point now — `boring build --emit-rust` always
+# appends a trailing `fn main()` (empty, if a file has no top-level
+# runnable statement); a real one here means `src/boring_gen.rs` (this
+# file's transpiled output) can be `[[bin]]`'s crate root directly, no
+# separate hand-written `src/main.rs` needed at all. Confirmed the exact
+# shape with a real `cargo build`+`cargo run` before deleting that file:
+# `boring`'s own auto-appended `fn main()` picks up whatever real
+# top-level statement is here, regardless of how many other declarations
+# come before it in the file.
+def main():
+    run_game()

@@ -1,0 +1,21 @@
+[project]
+name = "breakout-boring"
+version = "0.1.0"
+main = "boring/breakout.br"
+
+# Pulls in the shared, canonical bevy external-type declarations from
+# ../boring-bevylib instead of repeating them here -- see that project's
+# external_types.toml for the full list (a mirror of boring's own built-in
+# `KNOWN_EXTERNAL_TUPLE_STRUCTS`) and why it's declared at all despite being
+# currently redundant with the compiler. Any project-specific entry this game
+# alone needs (none so far) would go directly below as its own
+# tuple_structs/const_fns key, folded in alongside the included list.
+[external_types]
+include = ["../boring-bevylib/external_types.toml"]
+
+# Pulls in the shared Bevy derive-macro whitelist (Component/Resource/Event/
+# Deref) so boring/breakout.br's `struct X as Component, Debug:`-style headers
+# route those names into `#[derive(...)]` instead of a manual impl block --
+# see ../boring-bevylib/derives.toml for the full list and rationale.
+[derives]
+include = ["../boring-bevylib/derives.toml"]

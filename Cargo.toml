@@ -1,0 +1,29 @@
+[package]
+name = "breakout-boring"
+version = "0.1.0"
+edition = "2021"
+description = "Port of Bevy's official Breakout showcase example, with game data/logic/systems authored in the Boring language"
+license = "GPL-3.0"
+repository = "https://github.com/mlanoe/breakout-boring"
+
+# [lib] and [[bin]] deliberately point at the same file. There's no
+# hand-written src/lib.rs or src/main.rs at all — src/boring_gen.rs
+# (generated from boring/breakout.br, see boring/regen.sh) is both crate
+# roots directly. Cargo supports this fine (confirmed: cargo build/run/test
+# all work), it just emits one informational build-time notice about the
+# same file backing two targets — harmless, not a code warning, nothing
+# to fix. See README.md's "100% Boring-authored" section.
+[lib]
+name = "breakout_boring"
+path = "src/boring_gen.rs"
+
+[[bin]]
+name = "breakout-boring"
+path = "src/boring_gen.rs"
+
+[dependencies]
+# Full default features (window, render, audio, input, text/UI) — unlike
+# bevy-boring's headless PoC, this is a real visual game: sprites, sound,
+# keyboard. Confirmed compiling clean against 0.19 with default features
+# in a throwaway check before committing to this design.
+bevy = "0.19"
