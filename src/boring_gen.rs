@@ -466,6 +466,12 @@ pub enum WallLocation {
     Top,
 }
 
+impl std::fmt::Display for WallLocation {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
 impl WallLocation {
     pub fn position(&self) -> Point {
         match self {
@@ -515,6 +521,12 @@ pub enum Collision {
     Bottom,
 }
 
+impl std::fmt::Display for Collision {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
 
 pub fn move_by_velocity(pos: &Point, v: &Velocity, dt: f32) -> Point {
     Point { x: (pos.x + (v.x * dt)), y: (pos.y + (v.y * dt)) }
@@ -534,7 +546,7 @@ pub fn ball_collision(ball_center: &Point, ball_radius: f32, box_center: &Point,
     if (dist_sq > (ball_radius * ball_radius)) {
         return None;
     }
-    if ((offset_x as f64).abs() > (offset_y as f64).abs()) {
+    if ((offset_x as f32).abs() > (offset_y as f32).abs()) {
         if (offset_x < 0.0) {
             return Some(Collision::Left);
         } else {
