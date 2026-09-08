@@ -229,6 +229,25 @@ pub enum WallLocation:
     pub req Point size():
         let arena_height = TOP_WALL - BOTTOM_WALL
         let arena_width = RIGHT_WALL - LEFT_WALL
+        # These two asserts panic only if a future edit to the arena-wall
+        # constants above makes the arena degenerate or inverted — e.g.
+        # TOP_WALL <= BOTTOM_WALL or RIGHT_WALL <= LEFT_WALL (a typo'd sign,
+        # or LEFT_WALL/RIGHT_WALL swapped while retuning the play field).
+        # Unreachable today since those constants are fixed literals, but
+        # cheap to trip during a future resize.
+        #
+        # Left as `assert`/panic rather than converted to `throws`/`Result`:
+        # `size()` has no room to report failure without changing its
+        # signature, which the caller chain can't absorb cleanly either —
+        # `wall_bundle` (below) calls `location.size()` inline to build a
+        # plain `(Wall, Sprite, Transform)` tuple, and its own callers
+        # (`spawn_walls`'s `commands.spawn(wall_bundle(...))`, a `Startup`
+        # system) have no meaningful recovery for a malformed arena besides
+        # not spawning the wall at all — that's a startup-time configuration
+        # bug, not a runtime condition worth propagating a `Result` through
+        # three call sites for. A panic during `Startup` surfaces the bad
+        # constant immediately and unambiguously, which is the right
+        # failure mode here.
         assert(arena_height > 0.0)
         assert(arena_width > 0.0)
         match self:
@@ -402,6 +421,20 @@ pub def move_paddle(Res<ButtonInput<KeyCode>> keyboard_input, mut Single<mut Tra
     let new_x = clamp_paddle_x(paddle_transform.translation.x, direction, PADDLE_SPEED, time.delta_secs(), left_bound, right_bound)
     paddle_transform.translation.x = new_x
 
+# Inherited from the original Bevy example (examples/showcase/breakout.rs,
+# v0.19.0) as-is: this loop doesn't stop after the first resolved collision,
+# so if the ball overlaps more than one collider in the same frame (e.g. two
+# bricks meeting at a shared corner), each one gets its own despawn/score/
+# reflect in turn — the velocity reflection can apply twice in one tick.
+# Not fixed here: adding a `break` after the first collision isn't provably
+# safe without risking a real behavior change. It would silently drop
+# legitimate scoring for any frame where the ball genuinely overlaps two
+# distinct bricks at once (not just a hairline-adjacent pair), and it's
+# unclear whether `ball_collision`'s per-collider ordering (`collider_query`
+# iteration order, not physical proximity) would even pick the "correct"
+# one to keep. Since this is upstream Bevy's own long-standing behavior
+# rather than a bug introduced by this port, we leave it as-is rather than
+# risk a gameplay regression for a low-priority edge case.
 pub def check_for_collisions(mut Commands commands, mut ResMut<Score> score, mut Single<(mut Velocity&, Transform&), With<Ball>> ball_query, Query<(Entity, Transform&, Option<Brick&>), With<Collider>> collider_query):
     mut ball = ball_query.into_inner()
     for entity, collider_transform, maybe_brick in collider_query:
