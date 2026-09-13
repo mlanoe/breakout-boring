@@ -389,8 +389,8 @@ pub def spawn_bricks(mut Commands commands):
     let bottom_edge_of_bricks = paddle_y + GAP_BETWEEN_PADDLE_AND_BRICKS
     let total_height_of_bricks = TOP_WALL - bottom_edge_of_bricks - GAP_BETWEEN_BRICKS_AND_CEILING
     let layout = brick_layout(total_width_of_bricks, total_height_of_bricks, BRICK_SIZE.x, BRICK_SIZE.y, GAP_BETWEEN_BRICKS, LEFT_WALL, RIGHT_WALL, bottom_edge_of_bricks)
-    for row in 0..layout.n_rows:
-        for column in 0..layout.n_columns:
+    for row in 0..<layout.n_rows:
+        for column in 0..<layout.n_columns:
             let pos = brick_position(layout, row, column, BRICK_SIZE.x, BRICK_SIZE.y, GAP_BETWEEN_BRICKS)
             commands.spawn((
                 Sprite(color = BRICK_COLOR, _),
