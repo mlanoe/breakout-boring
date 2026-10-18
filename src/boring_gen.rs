@@ -17,6 +17,8 @@ trait BoringArrayIndex {
     fn next_index(&self, i: Option<usize>) -> Option<usize>;
     fn remove_at(&self, i: Option<usize>) -> Vec<Self::Item>;
     fn get_at(&self, i: Option<usize>) -> Self::Item;
+    fn move_item(&mut self, from: isize, to: isize);
+    fn remove_indices<I: AsRef<[isize]>>(&mut self, idx: I);
 }
 impl<T: Clone> BoringArrayIndex for Vec<T> {
     type Item = T;
@@ -33,6 +35,22 @@ impl<T: Clone> BoringArrayIndex for Vec<T> {
     }
     fn get_at(&self, i: Option<usize>) -> T {
         self[i.expect("get_at called with no index (empty collection or exhausted cursor)")].clone()
+    }
+    fn move_item(&mut self, from: isize, to: isize) {
+        let len = self.len() as isize;
+        assert!(from >= 0 && from < len && to >= 0 && to < len, "move: indices {} -> {} out of range for array of length {}", from, to, len);
+        if from != to { let item = self.remove(from as usize); self.insert(to as usize, item); }
+    }
+    fn remove_indices<I: AsRef<[isize]>>(&mut self, idx: I) {
+        let idx = idx.as_ref();
+        let len = self.len() as isize;
+        let mut prev = -1isize;
+        for &ix in idx {
+            assert!(ix >= 0 && ix < len, "removeIndices: index {} out of range for array of length {}", ix, len);
+            assert!(ix > prev, "removeIndices: indices must be unique and strictly ascending");
+            prev = ix;
+        }
+        for &ix in idx.iter().rev() { self.remove(ix as usize); }
     }
 }
 trait BoringDictIndex<K: Clone + Eq + std::hash::Hash, V: Clone> {
@@ -76,6 +94,16 @@ impl<T: Clone + Eq + std::hash::Hash> BoringSetIndex for HashSet<T> {
     }
 }
 
+// BoringLen — the `len()` an untyped parameter (`def size(x): x.len()`) is bounded by.
+#[allow(dead_code)]
+trait BoringLen { fn len(&self) -> usize; }
+impl<T> BoringLen for Vec<T> { fn len(&self) -> usize { <[T]>::len(self) } }
+impl<K, V, S> BoringLen for std::collections::HashMap<K, V, S> { fn len(&self) -> usize { std::collections::HashMap::len(self) } }
+impl<T, S> BoringLen for std::collections::HashSet<T, S> { fn len(&self) -> usize { std::collections::HashSet::len(self) } }
+// The `Arc` string type is swapped for its single-threaded twin by the textual fixup applied to the whole output; `&str` is a strict-mode literal. (Do not spell the twin out in this prelude: the Metal host reads it as the single-thread marker.)
+impl BoringLen for Arc<str> { fn len(&self) -> usize { self.chars().count() } }
+impl BoringLen for &str { fn len(&self) -> usize { self.chars().count() } }
+
 // BoringFmt — displays Vec<T: Display> as [a, b, c] (no debug quotes on strings).
 struct BoringFmt<'a, T: std::fmt::Display>(pub &'a [T]);
 impl<'a, T: std::fmt::Display> std::fmt::Display for BoringFmt<'a, T> {
@@ -87,6 +115,41 @@ impl<'a, T: std::fmt::Display> std::fmt::Display for BoringFmt<'a, T> {
         }
         write!(f, "]")
     }
+}
+
+// BoringFmtMap / BoringFmtSet — same unquoted rendering as the interpreter: {k: v} / {a, b}.
+struct BoringFmtMap<'a, K: std::fmt::Display, V: std::fmt::Display, S>(pub &'a std::collections::HashMap<K, V, S>);
+impl<'a, K: std::fmt::Display, V: std::fmt::Display, S> std::fmt::Display for BoringFmtMap<'a, K, V, S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{{")?;
+        for (i, (k, v)) in self.0.iter().enumerate() {
+            if i > 0 { write!(f, ", ")?; }
+            write!(f, "{}: {}", k, v)?;
+        }
+        write!(f, "}}")
+    }
+}
+struct BoringFmtSet<'a, T: std::fmt::Display, S>(pub &'a std::collections::HashSet<T, S>);
+impl<'a, T: std::fmt::Display, S> std::fmt::Display for BoringFmtSet<'a, T, S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{{")?;
+        for (i, v) in self.0.iter().enumerate() {
+            if i > 0 { write!(f, ", ")?; }
+            write!(f, "{}", v)?;
+        }
+        write!(f, "}}")
+    }
+}
+
+// Recursive collection/tuple/optional rendering (interpreter-style); callers build a closure per element type.
+fn bw_seq<T, F: Fn(&T) -> String>(v: &[T], f: F) -> String {
+    format!("[{}]", v.iter().map(|x| f(x)).collect::<Vec<_>>().join(", "))
+}
+fn bw_set<T, S, F: Fn(&T) -> String>(v: &std::collections::HashSet<T, S>, f: F) -> String {
+    format!("{{{}}}", v.iter().map(|x| f(x)).collect::<Vec<_>>().join(", "))
+}
+fn bw_map<K, V, S, FK: Fn(&K) -> String, FV: Fn(&V) -> String>(m: &std::collections::HashMap<K, V, S>, fk: FK, fv: FV) -> String {
+    format!("{{{}}}", m.iter().map(|(k, v)| format!("{}: {}", fk(k), fv(v))).collect::<Vec<_>>().join(", "))
 }
 
 // BoringVal — bridge trait that gives BoringError::Other both Display and Any (downcast).
@@ -127,7 +190,7 @@ impl std::fmt::Debug for dyn BoringVal + Send + Sync {
 // variants). `Other` still exists, narrowed to what only it can do: genuine
 // user-defined enums/structs the compiler can't enumerate in advance.
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum ScalarKind { Int8, Int16, Int32, Int64, Int128, Uint8, Uint16, Uint32, Uint64, Uint128, Float32 }
+enum ScalarKind { Int8, Int16, Int32, Int64, Int128, Uint8, Uint16, Uint32, Uint64, Uint128, Float16, Float32 }
 impl BoringError {
     fn scalar_i8(v: i8) -> Self { BoringError::Scalar(ScalarKind::Int8, v as i128 as u128) }
     fn scalar_i16(v: i16) -> Self { BoringError::Scalar(ScalarKind::Int16, v as i128 as u128) }
@@ -139,6 +202,7 @@ impl BoringError {
     fn scalar_u32(v: u32) -> Self { BoringError::Scalar(ScalarKind::Uint32, v as u128) }
     fn scalar_u64(v: u64) -> Self { BoringError::Scalar(ScalarKind::Uint64, v as u128) }
     fn scalar_u128(v: u128) -> Self { BoringError::Scalar(ScalarKind::Uint128, v) }
+    fn scalar_f16_bits(v: u16) -> Self { BoringError::Scalar(ScalarKind::Float16, v as u128) }
     fn scalar_f32(v: f32) -> Self { BoringError::Scalar(ScalarKind::Float32, v.to_bits() as u128) }
 }
 #[derive(Debug)]
@@ -170,6 +234,7 @@ impl std::fmt::Display for BoringError {
                 ScalarKind::Uint32  => write!(f, "{}", *bits as u32),
                 ScalarKind::Uint64  => write!(f, "{}", *bits as u64),
                 ScalarKind::Uint128 => write!(f, "{}", *bits),
+                ScalarKind::Float16 => write!(f, "{}", __boring_scalar_f16_to_f32(*bits as u16)),
                 ScalarKind::Float32 => write!(f, "{}", f32::from_bits(*bits as u32)),
             },
             BoringError::Other(_, e)    => write!(f, "{}", e),
@@ -177,6 +242,19 @@ impl std::fmt::Display for BoringError {
     }
 }
 impl std::error::Error for BoringError {}
+
+fn __boring_scalar_f16_to_f32(bits: u16) -> f32 {
+    let sign = if bits & 0x8000 == 0 { 1.0f32 } else { -1.0f32 };
+    let exponent = ((bits >> 10) & 0x1f) as i32;
+    let fraction = (bits & 0x03ff) as u32;
+    let magnitude = match exponent {
+        0 => (fraction as f32) * 2.0f32.powi(-24),
+        31 if fraction == 0 => f32::INFINITY,
+        31 => f32::NAN,
+        _ => (1.0 + fraction as f32 / 1024.0) * 2.0f32.powi(exponent - 15),
+    };
+    sign * magnitude
+}
 
 // Boring standard error enum — always available without import.
 // Use `throw Error.Expired` / `catch Error:` / `match err: Error.Expired: ...`
@@ -208,10 +286,10 @@ impl std::error::Error for Error {}
 // cuda/rocm/metal report GPU failures as plain string-message errors
 // instead of this typed enum -- see `docs/gpu-module.md`'s error-handling
 // notes for why (their host transpilers don't share this prelude).
-// Use `catch GpuError.OutOfMemory:` / `match err: GpuError.Timeout: ...`
+// Use `catch KernelError.OutOfMemory:` / `match err: KernelError.Timeout: ...`
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
-enum GpuError {
+enum KernelError {
     LaunchError,
     OutOfMemory,
     IllegalAccess,
@@ -219,19 +297,19 @@ enum GpuError {
     Timeout,
     DeviceLost,
 }
-impl std::fmt::Display for GpuError {
+impl std::fmt::Display for KernelError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            GpuError::LaunchError   => write!(f, "GPU kernel launch failed"),
-            GpuError::OutOfMemory   => write!(f, "GPU out of memory"),
-            GpuError::IllegalAccess => write!(f, "GPU illegal memory access"),
-            GpuError::StackOverflow => write!(f, "GPU stack overflow"),
-            GpuError::Timeout       => write!(f, "GPU operation timed out"),
-            GpuError::DeviceLost    => write!(f, "GPU device lost"),
+            KernelError::LaunchError   => write!(f, "GPU kernel launch failed"),
+            KernelError::OutOfMemory   => write!(f, "GPU out of memory"),
+            KernelError::IllegalAccess => write!(f, "GPU illegal memory access"),
+            KernelError::StackOverflow => write!(f, "GPU stack overflow"),
+            KernelError::Timeout       => write!(f, "GPU operation timed out"),
+            KernelError::DeviceLost    => write!(f, "GPU device lost"),
         }
     }
 }
-impl std::error::Error for GpuError {}
+impl std::error::Error for KernelError {}
 
 use bevy::prelude::*;
 
@@ -281,7 +359,7 @@ const WALL_COLOR: Color = Color::srgb(0.8, 0.8, 0.8);
 
 const BACKGROUND_COLOR: Color = Color::srgb(0.9, 0.9, 0.9);
 
-#[derive(Debug, Clone, PartialEq, Component)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Component)]
 pub struct Paddle {
 }
 
@@ -294,7 +372,7 @@ impl std::fmt::Display for Paddle {
 impl Paddle {
 }
 
-#[derive(Debug, Clone, PartialEq, Component)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Component)]
 pub struct Ball {
 }
 
@@ -307,7 +385,7 @@ impl std::fmt::Display for Ball {
 impl Ball {
 }
 
-#[derive(Debug, Clone, PartialEq, Component)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Component)]
 pub struct Brick {
 }
 
@@ -320,7 +398,7 @@ impl std::fmt::Display for Brick {
 impl Brick {
 }
 
-#[derive(Debug, Clone, PartialEq, Component, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Component, Default)]
 pub struct Collider {
 }
 
@@ -333,7 +411,7 @@ impl std::fmt::Display for Collider {
 impl Collider {
 }
 
-#[derive(Debug, Clone, PartialEq, Component)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Component)]
 #[require(Sprite, Transform, Collider)]
 pub struct Wall {
 }
@@ -347,7 +425,7 @@ impl std::fmt::Display for Wall {
 impl Wall {
 }
 
-#[derive(Debug, Clone, PartialEq, Component)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Component)]
 pub struct ScoreboardUi {
 }
 
@@ -360,7 +438,7 @@ impl std::fmt::Display for ScoreboardUi {
 impl ScoreboardUi {
 }
 
-#[derive(Debug, Clone, PartialEq, Event)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Event)]
 pub struct BallCollided {
 }
 
@@ -388,7 +466,7 @@ impl std::fmt::Display for Velocity {
 impl Velocity {
 }
 
-#[derive(Debug, Clone, PartialEq, Resource)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Resource)]
 pub struct Score {
     pub count: /* var */ isize,
 }
