@@ -111,29 +111,31 @@ let BACKGROUND_COLOR = Color.srgb(0.9, 0.9, 0.9)
 # generated `Display` impl fails to compile (`doesn't implement
 # std::fmt::Debug`).
 
-pub struct Paddle as Component, Debug:
+@component
+pub data Paddle:
     pass
 
-pub struct Ball as Component, Debug:
+@component
+pub data Ball:
     pass
 
-pub struct Brick as Component, Debug:
+@component
+pub data Brick:
     pass
 
-# `Default` is required because `Wall` below requires this component —
-# Bevy's `#[require(...)]` needs the required type to implement `Default`.
-pub struct Collider as Component, Default, Debug:
+# `Default` is automatically derived for unit components.
+@component
+pub data Collider:
     pass
 
-# `@require(Sprite, Transform, Collider)` stacks on top of the `as Component:`
-# header — a plain passthrough attribute alongside a header trait list,
-# confirmed working (see ../README.md). Matches the original's
-# `#[require(Sprite, Transform, Collider)]` almost verbatim.
+# `@require(Sprite, Transform, Collider)` stacks on top of `@component`.
 @require(Sprite, Transform, Collider)
-pub struct Wall as Component, Debug:
+@component
+pub data Wall:
     pass
 
-pub struct ScoreboardUi as Component, Debug:
+@component
+pub data ScoreboardUi:
     pass
 
 pub struct BallCollided as Event, Debug:
@@ -142,19 +144,17 @@ pub struct BallCollided as Event, Debug:
 # ─── Components with data ────────────────────────────────────────────────────
 # `float32` throughout this file (not `float`/f64) — matches Bevy's
 # `Transform`/`Vec2`/`Vec3` (`f32`) exactly, so no cast is ever needed at a
-# Rust/Bevy boundary. (There's a known transpiler bug where a `float32`
-# function that calls a builtin like `sqrt()` emits a mismatched `f64` body
-# — filed as task_b09eda59 — but nothing here calls `sqrt()`, so it never
-# hits that path; `clamp`/`abs`/plain arithmetic on `float32` are confirmed
-# fine.)
+# Rust/Bevy boundary.
 
-pub struct Velocity as Component, Debug, Clone:
+@component
+pub data Velocity:
     pub float32 x
     pub float32 y
 
 # ─── Resources ────────────────────────────────────────────────────────────────
 
-pub struct Score as Resource, Debug, Clone:
+@resource
+pub data Score:
     pub var int count = 0
 
     pub def increment():
@@ -185,15 +185,13 @@ pub struct CollisionSound as Resource, Deref, Debug:
     pub Handle<AudioSource> handle
 
 # ─── Plain value types for pure logic ────────────────────────────────────────
-# Deliberately NOT Bevy types (no Component/Resource/Event header) —
-# decouples the geometry/collision math below from ECS storage so it's
-# trivially unit-testable on its own.
+# Pure value types declared as `data` — POD with value semantics.
 
-pub struct Point:
+pub data Point:
     pub float32 x
     pub float32 y
 
-pub struct BrickLayout:
+pub data BrickLayout:
     pub int n_columns
     pub int n_rows
     pub float32 offset_x
@@ -403,12 +401,11 @@ pub def spawn_bricks(mut Commands commands):
 # On<...>), native Boring syntax. All delegate the actual math/mutation to
 # the plain functions/methods above rather than duplicating logic.
 
-pub def apply_velocity(Query<(mut Transform&, Velocity&)> query, Res<Time> time):
-    let dt = time.delta_secs()
-    for transform, velocity in query:
-        let next = move_by_velocity(Point(x = transform.translation.x, y = transform.translation.y), velocity, dt)
-        transform.translation.x = next.x
-        transform.translation.y = next.y
+query apply_velocity(mut Transform transform, Velocity velocity):
+    let dt = .time.delta as float32
+    let next = move_by_velocity(Point(x = transform.translation.x, y = transform.translation.y), velocity, dt)
+    transform.translation.x = next.x
+    transform.translation.y = next.y
 
 pub def move_paddle(Res<ButtonInput<KeyCode>> keyboard_input, mut Single<mut Transform&, With<Paddle>> paddle_transform, Res<Time> time):
     var direction = 0.0

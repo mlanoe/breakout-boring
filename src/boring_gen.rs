@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::sync::{Mutex, RwLock};
 use std::f64::consts::{PI, E, TAU};
 use std::time::Duration;
+use bevy::prelude::*;
 
 trait BoringArrayIndex {
     type Item: Clone;
@@ -359,7 +360,7 @@ const WALL_COLOR: Color = Color::srgb(0.8, 0.8, 0.8);
 
 const BACKGROUND_COLOR: Color = Color::srgb(0.9, 0.9, 0.9);
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Component)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Component, Copy, Default)]
 pub struct Paddle {
 }
 
@@ -372,7 +373,7 @@ impl std::fmt::Display for Paddle {
 impl Paddle {
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Component)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Component, Copy, Default)]
 pub struct Ball {
 }
 
@@ -385,7 +386,7 @@ impl std::fmt::Display for Ball {
 impl Ball {
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Component)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Component, Copy, Default)]
 pub struct Brick {
 }
 
@@ -398,7 +399,7 @@ impl std::fmt::Display for Brick {
 impl Brick {
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Component, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Component, Copy, Default)]
 pub struct Collider {
 }
 
@@ -411,7 +412,7 @@ impl std::fmt::Display for Collider {
 impl Collider {
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Component)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Component, Copy, Default)]
 #[require(Sprite, Transform, Collider)]
 pub struct Wall {
 }
@@ -425,7 +426,7 @@ impl std::fmt::Display for Wall {
 impl Wall {
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Component)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Component, Copy, Default)]
 pub struct ScoreboardUi {
 }
 
@@ -680,7 +681,7 @@ pub fn brick_layout(total_width: f32, total_height: f32, brick_w: f32, brick_h: 
     assert!((total_height > 0.0));
     let n_columns = (((total_width / (brick_w + gap)) as f32).floor() as isize);
     let n_rows = (((total_height / (brick_h + gap)) as f32).floor() as isize);
-    let n_vertical_gaps = (n_columns - 1);
+    let n_vertical_gaps = n_columns.wrapping_sub((1 as isize));
     let center_x = ((left_wall + right_wall) / 2.0);
     let left_edge = ((center_x - (((n_columns as f32) / 2.0) * brick_w)) - (((n_vertical_gaps as f32) / 2.0) * gap));
     let offset_x = (left_edge + (brick_w / 2.0));
@@ -742,14 +743,15 @@ pub fn spawn_bricks(mut commands: Commands) -> () {
     }
 }
 
-pub fn apply_velocity(query: Query<(&mut Transform, &Velocity)>, time: Res<Time>) -> () {
-    let dt = time.delta_secs();
-    for (mut transform, velocity) in query.into_iter() {
-        let next = move_by_velocity(&Point { x: transform.translation.x, y: transform.translation.y }, &velocity, dt);
+pub fn apply_velocity(mut query: Query<(&mut Transform, &Velocity)>, time: Res<Time>) {
+    for (mut transform, velocity) in &mut query {
+        let dt = ((time.delta_secs() as f64) as f32);
+        let next = move_by_velocity(&Point { x: transform.translation.x, y: transform.translation.y }, &velocity, dt.clone());
         transform.translation.x = next.x;
         transform.translation.y = next.y;
     }
 }
+
 
 pub fn move_paddle(keyboard_input: Res<ButtonInput<KeyCode>>, mut paddle_transform: Single<&mut Transform, With<Paddle>>, time: Res<Time>) -> () {
     let mut direction = 0.0;
