@@ -3,8 +3,7 @@
 # (examples/showcase/breakout.rs, bevy v0.19.0).
 #
 # What ties this file to Bevy:
-#   1. `use bevy.prelude.*` below — a generic Boring `use` (dotted-path
-#      passthrough), transpiled verbatim to `use bevy::prelude::*;`.
+#   1. Native ECS framework — no manual Bevy prelude import needed.
 #   2. `struct X as Component, ...:` / `as Resource, ...:` / `as Event, ...:`
 #      header trait lists — `Component`/`Resource`/`Event`/`Deref` are
 #      registered as known derive macros via ../boring.toml's `[derives]`
@@ -16,7 +15,7 @@
 #      passthrough attribute — it isn't a derive at all.
 #   3. `move_paddle`/`apply_velocity`/`check_for_collisions`/
 #      `play_collision_sound`/`update_scoreboard` below are real Bevy
-#      *systems* — native `Query<...>`/`Single<...>`/`Commands`/`Res`/
+#      *systems* — native `query`/`single`/`for ... where`/`Commands`/`Res`/
 #      `ResMut`/`On<...>` syntax, not just plain-data logic. Requires a
 #      `boring` built from `main` (see ../README.md's "Building boring"
 #      section).
@@ -36,7 +35,7 @@
 # and `src/main.rs`'s one-line wrapper now, both structural rather than
 # language gaps).
 
-use bevy.prelude.*
+
 
 # ─── Module constants ────────────────────────────────────────────────────────
 # Plain numbers, plus Vec2/Vec3/Color/FontSize/Val values too — every
@@ -74,19 +73,19 @@ pub let float32 BOTTOM_WALL = -300.0
 pub let float32 TOP_WALL = 300.0
 let float32 WALL_THICKNESS = 10.0
 let float32 PADDLE_PADDING = 10.0
-let float32 PADDLE_SPEED = 500.0
+let float32 PADDLE_SPEED = 700.0
 pub let float32 BALL_DIAMETER = 30.0
 let float32 GAP_BETWEEN_PADDLE_AND_FLOOR = 60.0
-let float32 BALL_SPEED = 400.0
+let float32 BALL_SPEED = 550.0
 let float32 GAP_BETWEEN_PADDLE_AND_BRICKS = 270.0
 let float32 GAP_BETWEEN_BRICKS = 5.0
 let float32 GAP_BETWEEN_BRICKS_AND_CEILING = 20.0
 let float32 GAP_BETWEEN_BRICKS_AND_SIDES = 20.0
 
-let PADDLE_SIZE = Vec2.new(120.0, 20.0)
-let BALL_STARTING_POSITION = Vec3.new(0.0, -50.0, 1.0)
-let INITIAL_BALL_DIRECTION = Vec2.new(0.5, -0.5)
-let BRICK_SIZE = Vec2.new(100.0, 30.0)
+let Vec2 PADDLE_SIZE = [120.0, 20.0]
+let Vec3 BALL_STARTING_POSITION = [0.0, -50.0, 1.0]
+let Vec2 INITIAL_BALL_DIRECTION = [0.5, -0.5]
+let Vec2 BRICK_SIZE = [100.0, 30.0]
 
 let PADDLE_COLOR = Color.srgb(0.3, 0.3, 0.7)
 let BALL_COLOR = Color.srgb(1.0, 0.5, 0.5)
@@ -152,6 +151,10 @@ pub data Velocity:
     pub float32 y
 
 # ─── Resources ────────────────────────────────────────────────────────────────
+
+@resource
+pub data PlayState:
+    pub var bool in_play = false
 
 @resource
 pub data Score:
@@ -330,7 +333,7 @@ pub def Point brick_position(BrickLayout layout, int row, int column, float32 br
 pub def (Wall, Sprite, Transform) wall_bundle(WallLocation location):
     let pos = location.position()
     let size = location.size()
-    (Wall(), Sprite.from_color(WALL_COLOR, Vec2.ONE), Transform(translation = Vec3.new(pos.x, pos.y, 0.0), scale = Vec3.new(size.x, size.y, 1.0), _))
+    (Wall(), Sprite.from_color(WALL_COLOR, Vec2.ONE), Transform(translation = [pos.x, pos.y, 0.0], scale = [size.x, size.y, 1.0], _))
 
 # ─── Startup systems (entity spawning) ───────────────────────────────────────
 # Used to be one big hand-written Rust `setup()`. Split into several small
@@ -338,27 +341,17 @@ pub def (Wall, Sprite, Transform) wall_bundle(WallLocation location):
 # `Startup`-scheduled systems with no data dependency between them can run
 # in any order, and `build_app()` just lists them all in a tuple.
 
-pub def spawn_camera(mut Commands commands):
-    commands.spawn(Camera2d)
-
-# Used to be `build_app`'s `.insert_resource(ClearColor(BACKGROUND_COLOR))`,
-# in ../src/lib.rs — `ClearColor(...)` is a plain external tuple struct
-# with no inherent `new()` (same shape `Mesh2d`/`TextColor` were before
-# their fix), and it wasn't on the fixed allowlist yet (it emitted the
-# invalid `ClearColor::new(...)`). Fixed on `main` now — confirmed with a
-# real `cargo build` before this was written (task_cdb145d3).
-pub def set_clear_color(mut Commands commands):
-    commands.insert_resource(ClearColor(BACKGROUND_COLOR))
-
-pub def load_collision_sound(mut Commands commands, Res<AssetServer> asset_server):
+@schedule(Startup)
+pub def load_collision_sound(mut Commands commands, AssetServer asset_server):
     let handle = asset_server.load("sounds/breakout_collision.ogg")
     commands.insert_resource(CollisionSound(handle = handle))
 
+@schedule(Startup)
 pub def spawn_paddle(mut Commands commands):
     let paddle_y = BOTTOM_WALL + GAP_BETWEEN_PADDLE_AND_FLOOR
     commands.spawn((
         Sprite.from_color(PADDLE_COLOR, Vec2.ONE),
-        Transform(translation = Vec3.new(0.0, paddle_y, 0.0), scale = PADDLE_SIZE.extend(1.0), _),
+        Transform(translation = [0.0, paddle_y, 0.0], scale = PADDLE_SIZE.extend(1.0), _),
         Paddle(),
         Collider()))
 
@@ -366,21 +359,26 @@ pub def spawn_paddle(mut Commands commands):
 # `::new()` — used to emit the invalid `Mesh2d::new(...)` (task_306c80f5).
 # Fixed on `main` now (confirmed with a real `cargo build` against bevy),
 # the literal call form below is what unblocked this system entirely.
-pub def spawn_ball(mut Commands commands, mut ResMut<Assets<Mesh>> meshes, mut ResMut<Assets<ColorMaterial>> materials):
-    let initial_velocity = INITIAL_BALL_DIRECTION.normalize() * BALL_SPEED
+@schedule(Startup)
+pub def spawn_ball(mut Commands commands, mut Assets<Mesh> meshes, mut Assets<ColorMaterial> materials):
+    let paddle_y = BOTTOM_WALL + GAP_BETWEEN_PADDLE_AND_FLOOR
+    let resting_y = paddle_y + PADDLE_SIZE.y / 2.0 + BALL_DIAMETER / 2.0
+    let Vec3 start_pos = [0.0, resting_y, 1.0]
     commands.spawn((
         Mesh2d(meshes.add(Circle.default())),
         MeshMaterial2d(materials.add(BALL_COLOR)),
-        Transform.from_translation(BALL_STARTING_POSITION).with_scale(Vec2.splat(BALL_DIAMETER).extend(1.0)),
+        Transform.from_translation(start_pos).with_scale(Vec2.splat(BALL_DIAMETER).extend(1.0)),
         Ball(),
-        Velocity(x = initial_velocity.x, y = initial_velocity.y)))
+        Velocity(x = 0.0, y = 0.0)))
 
+@schedule(Startup)
 pub def spawn_walls(mut Commands commands):
     commands.spawn(wall_bundle(WallLocation.Left))
     commands.spawn(wall_bundle(WallLocation.Right))
     commands.spawn(wall_bundle(WallLocation.Bottom))
     commands.spawn(wall_bundle(WallLocation.Top))
 
+@schedule(Startup)
 pub def spawn_bricks(mut Commands commands):
     let paddle_y = BOTTOM_WALL + GAP_BETWEEN_PADDLE_AND_FLOOR
     let total_width_of_bricks = (RIGHT_WALL - LEFT_WALL) - 2.0 * GAP_BETWEEN_BRICKS_AND_SIDES
@@ -392,7 +390,7 @@ pub def spawn_bricks(mut Commands commands):
             let pos = brick_position(layout, row, column, BRICK_SIZE.x, BRICK_SIZE.y, GAP_BETWEEN_BRICKS)
             commands.spawn((
                 Sprite(color = BRICK_COLOR, _),
-                Transform(translation = Vec3.new(pos.x, pos.y, 0.0), scale = Vec3.new(BRICK_SIZE.x, BRICK_SIZE.y, 1.0), _),
+                Transform(translation = [pos.x, pos.y, 0.0], scale = [BRICK_SIZE.x, BRICK_SIZE.y, 1.0], _),
                 Brick(),
                 Collider()))
 
@@ -401,22 +399,25 @@ pub def spawn_bricks(mut Commands commands):
 # On<...>), native Boring syntax. All delegate the actual math/mutation to
 # the plain functions/methods above rather than duplicating logic.
 
-query apply_velocity(mut Transform transform, Velocity velocity):
-    let dt = .time.delta as float32
+@schedule(FixedUpdate)
+def apply_velocity(mut Transform transform, Velocity velocity):
+    let dt = time.delta as float32
     let next = move_by_velocity(Point(x = transform.translation.x, y = transform.translation.y), velocity, dt)
     transform.translation.x = next.x
     transform.translation.y = next.y
 
-pub def move_paddle(Res<ButtonInput<KeyCode>> keyboard_input, mut Single<mut Transform&, With<Paddle>> paddle_transform, Res<Time> time):
+@schedule(FixedUpdate)
+@after(apply_velocity)
+pub def move_paddle(mut Transform transform) where Paddle:
     var direction = 0.0
-    if keyboard_input.pressed(KeyCode.ArrowLeft):
+    if input.pressed(KeyCode.ArrowLeft):
         direction -= 1.0
-    if keyboard_input.pressed(KeyCode.ArrowRight):
+    if input.pressed(KeyCode.ArrowRight):
         direction += 1.0
     let left_bound = LEFT_WALL + WALL_THICKNESS / 2.0 + PADDLE_SIZE.x / 2.0 + PADDLE_PADDING
     let right_bound = RIGHT_WALL - WALL_THICKNESS / 2.0 - PADDLE_SIZE.x / 2.0 - PADDLE_PADDING
-    let new_x = clamp_paddle_x(paddle_transform.translation.x, direction, PADDLE_SPEED, time.delta_secs(), left_bound, right_bound)
-    paddle_transform.translation.x = new_x
+    let new_x = clamp_paddle_x(transform.translation.x, direction, PADDLE_SPEED, time.delta as float32, left_bound, right_bound)
+    transform.translation.x = new_x
 
 # Inherited from the original Bevy example (examples/showcase/breakout.rs,
 # v0.19.0) as-is: this loop doesn't stop after the first resolved collision,
@@ -432,9 +433,37 @@ pub def move_paddle(Res<ButtonInput<KeyCode>> keyboard_input, mut Single<mut Tra
 # one to keep. Since this is upstream Bevy's own long-standing behavior
 # rather than a bug introduced by this port, we leave it as-is rather than
 # risk a gameplay regression for a low-priority edge case.
-pub def check_for_collisions(mut Commands commands, mut ResMut<Score> score, mut Single<(mut Velocity&, Transform&), With<Ball>> ball_query, Query<(Entity, Transform&, Option<Brick&>), With<Collider>> collider_query):
-    mut ball = ball_query.into_inner()
-    for entity, collider_transform, maybe_brick in collider_query:
+@schedule(FixedUpdate)
+@after(move_paddle)
+pub def update_ball(mut PlayState play_state):
+    mut paddle = query single Transform where Paddle and not Ball
+    mut ball = query single (mut Transform, mut Velocity) where Ball
+    let paddle_y = BOTTOM_WALL + GAP_BETWEEN_PADDLE_AND_FLOOR
+    let resting_y = paddle_y + PADDLE_SIZE.y / 2.0 + BALL_DIAMETER / 2.0
+    if !play_state.in_play:
+        ball.0.translation.x = paddle.translation.x
+        ball.0.translation.y = resting_y
+        ball.1.x = 0.0
+        ball.1.y = 0.0
+        if input.justPressed(KeyCode.Space):
+            play_state.in_play = true
+            let initial_velocity = INITIAL_BALL_DIRECTION.normalize() * BALL_SPEED
+            let float32 vy = BALL_SPEED * 0.7071
+            ball.1.x = initial_velocity.x
+            ball.1.y = vy
+    else:
+        if ball.0.translation.y < paddle_y - BALL_DIAMETER:
+            play_state.in_play = false
+            ball.1.x = 0.0
+            ball.1.y = 0.0
+            ball.0.translation.x = paddle.translation.x
+            ball.0.translation.y = resting_y
+
+@schedule(FixedUpdate)
+@after(update_ball)
+pub def check_for_collisions(mut commands, mut Score score):
+    mut ball = query single (mut Velocity, Transform) where Ball
+    for entity, Transform collider_transform, Brick? maybe_brick where Collider:
         let maybe_collision = ball_collision(
             Point(x = ball.1.translation.x, y = ball.1.translation.y),
             BALL_DIAMETER / 2.0,
@@ -449,7 +478,7 @@ pub def check_for_collisions(mut Commands commands, mut ResMut<Score> score, mut
             ball.0.x = reflected.x
             ball.0.y = reflected.y
 
-pub def play_collision_sound(On<BallCollided> collided, mut Commands commands, Res<CollisionSound> sound):
+pub def play_collision_sound(On<BallCollided> collided, mut Commands commands, CollisionSound sound):
     commands.spawn(AudioPlayer(sound.clone()))
 
 # `SCOREBOARD_FONT_SIZE`/`SCOREBOARD_TEXT_PADDING`/`TEXT_COLOR`/
@@ -477,6 +506,7 @@ let SCORE_COLOR = Color.srgb(1.0, 0.5, 0.5)
 # error (`unexpected token in expression: Indent`); Boring doesn't
 # support that continuation shape, unlike Python's implicit parenthesized
 # line continuation.
+@schedule(Startup)
 pub def spawn_scoreboard_ui(mut Commands commands):
     mut root = commands.spawn((
         Text.new("Score: "),
@@ -493,9 +523,8 @@ pub def spawn_scoreboard_ui(mut Commands commands):
     # section) discards the value and evaluates to `()`.
     root.with_children((parent): drop(parent.spawn((TextSpan.default(), TextFont(font_size = SCOREBOARD_FONT_SIZE, _), TextColor(SCORE_COLOR)))))
 
-# `score_root.pointee` unwraps the `Single<Entity, F>` deref wrapper to the
-# `Entity` it wraps (read-only — `Entity` is `Copy`, no `mut` needed on the
-# param). `writer.text(...).pointee = ...` writes through the `Mut<String>`-
+# `single entity where ...` fetches the score root entity directly.
+# `writer.text(...).pointee = ...` writes through the `Mut<String>`-
 # shaped guard `TextUiWriter::text()` returns — this is the one call site
 # `.pointee` exists for; see the file header's point 4.
 # `score.count` used to need a same-named-avoiding getter (`score.value()`)
@@ -511,53 +540,18 @@ pub def spawn_scoreboard_ui(mut Commands commands):
 # (Boring has no `string(x)` builtin, but arbitrary methods on a string
 # receiver aren't intercepted) and produces a real owned `String` via
 # `Arc<str>`'s blanket `Display` impl.
-pub def update_scoreboard(Res<Score> score, Single<Entity, (With<ScoreboardUi>, With<Text>)> score_root, mut TextUiWriter writer):
-    writer.text(score_root.pointee, 1).pointee = "{score.count}".to_string()
+@schedule(Update)
+pub def update_scoreboard(Score score, mut TextUiWriter writer):
+    let score_root = query single entity where (ScoreboardUi, Text)
+    writer.text(score_root, 1).pointee = "{score.count}".to_string()
 
-# ─── App wiring + entry point ────────────────────────────────────────────────
-# `build_app` used to be hand-written Rust in ../src/lib.rs — on the
-# (never actually re-tested) assumption that App-wiring code needed Rust.
-# It doesn't: `App.new()`/`.add_plugins(...)`/`.add_systems(...)`/
-# `.add_observer(...)` are all just generic method calls, and a tuple of
-# function names + `.chain()` already worked (confirmed way back when
-# `run_game` below was first written) — the only thing that needed
-# checking was whether a multi-statement function returning its `mut`
-# local at the end infers the right return type. It doesn't by default
-# (`pub def build_app():` alone infers `-> ()`, silently turning the
-# trailing `app` into a discarded statement) — an explicit `pub def App
-# build_app():` return-type annotation fixes it. Confirmed with a real
-# `cargo build` before this was written.
-#
-# `run_game` calls it and runs it. `../src/main.rs` is a one-line wrapper
-# around `run_game` instead of hand-writing any of this itself — there's
-# still a real `fn main()` in `src/main.rs`, not a function here: Boring's
-# per-file `--emit-rust` output lands inside `mod boring_gen { ... }`
-# (`pub mod boring_gen;` in lib.rs, so tests can import from it), and a
-# nested module's `fn main` isn't a valid Cargo `[[bin]]` entry point —
-# only a real crate-root file can be that, regardless of what generates its
-# content. That's a Cargo/module-layout fact, not a Boring language gap —
-# see ../README.md.
-pub def App build_app():
-    mut app = App.new()
-    app.add_plugins(DefaultPlugins)
-    app.insert_resource(Score(count = 0))
-    app.add_systems(Startup, (set_clear_color, spawn_camera, load_collision_sound, spawn_paddle, spawn_ball, spawn_walls, spawn_bricks, spawn_scoreboard_ui))
-    app.add_systems(Update, (apply_velocity, move_paddle, check_for_collisions).chain())
-    app.add_systems(Update, update_scoreboard)
-    app.add_observer(play_collision_sound)
-    app
-
-pub def run_game():
-    build_app().run()
-
-# The real crate entry point now — `boring build --emit-rust` always
-# appends a trailing `fn main()` (empty, if a file has no top-level
-# runnable statement); a real one here means `src/boring_gen.rs` (this
-# file's transpiled output) can be `[[bin]]`'s crate root directly, no
-# separate hand-written `src/main.rs` needed at all. Confirmed the exact
-# shape with a real `cargo build`+`cargo run` before deleting that file:
-# `boring`'s own auto-appended `fn main()` picks up whatever real
-# top-level statement is here, regardless of how many other declarations
-# come before it in the file.
-def main():
-    run_game()
+# ─── Game Declaration ────────────────────────────────────────────────────────
+# Using the native Boring @game framework. Window configuration, default 2D camera,
+# schedule registration for all @schedule(Startup) / @schedule(Update) systems,
+# observer wiring, and the app bootstrap are all generated automatically.
+@game
+pub data Breakout:
+    string title = "Breakout!"
+    int width = 1000
+    int height = 700
+    Color clear_color = BACKGROUND_COLOR

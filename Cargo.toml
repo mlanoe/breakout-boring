@@ -27,3 +27,7 @@ path = "src/boring_gen.rs"
 # keyboard. Confirmed compiling clean against 0.19 with default features
 # in a throwaway check before committing to this design.
 bevy = "0.19"
+
+# Optimize dependencies (including Bevy) in dev mode for smooth 60fps performance:
+[profile.dev.package."*"]
+opt-level = 3

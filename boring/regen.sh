@@ -36,7 +36,7 @@ trap 'rm -f "$tmp"' EXIT
   # the [lib] target's perspective (this same file is both [lib]'s and
   # [[bin]]'s crate root — see ../Cargo.toml/../README.md) — the [lib]
   # compilation never calls it, only the [[bin]] one does.
-  echo "#![allow(dead_code, non_snake_case, unused_imports, unused_parens, unused_mut, unused_variables)]"
+  echo "#![allow(dead_code, non_snake_case, unused_imports, unused_parens, unused_mut, unused_variables, clippy::all)]"
   echo
   # breakout.br's trailing `def main(): run_game()` is kept this time —
   # unlike bevy-boring's sim.br (which strips this, since that project's
